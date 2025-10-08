@@ -1,6 +1,5 @@
 // --- Imports
 import express from "express";
-import crypto from "crypto";
 import fetch from "node-fetch";
 import { Pool } from "pg";
 import { shopifyApi, ApiVersion } from "@shopify/shopify-api";
@@ -10,20 +9,16 @@ const {
   SHOPIFY_API_KEY,
   SHOPIFY_API_SECRET,
   APP_URL,          // e.g. https://cod-app-omega.vercel.app
-  DATABASE_URL,     // Neon / Postgres connection string
-  SCOPES            // optional override
+  DATABASE_URL,     // Neon / Postgres
+  SCOPES
 } = process.env;
-
-if (!SHOPIFY_API_KEY || !SHOPIFY_API_SECRET) {
-  console.warn("Missing ENV: SHOPIFY_API_KEY / SHOPIFY_API_SECRET");
-}
 
 // --- Express
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- DB (lazy, SSL for Neon on Vercel)
+// --- DB (lazy) + SSL for Neon
 let pool;
 function getPool() {
   if (!pool && DATABASE_URL) {
@@ -34,7 +29,6 @@ function getPool() {
   }
   return pool;
 }
-
 async function ensureTablesSafe() {
   try {
     const p = getPool();
@@ -48,25 +42,35 @@ async function ensureTablesSafe() {
       );
     `);
   } catch (e) {
-    console.error("ensureTables error (non-fatal):", e.message);
+    console.error("ensureTables error:", e.message);
   }
 }
 
-// --- Shopify SDK (safe hostName even if APP_URL missing)
-const HOST_NAME = (APP_URL || process.env.VERCEL_URL || "cod-app-omega.vercel.app")
-  .toString()
-  .replace(/^https?:\/\//, "");
+// --- Shopify SDK (LAZY INIT – only when needed)
+let _shopify = null;
+function getShopify() {
+  if (_shopify) return _shopify;
 
-const shopify = shopifyApi({
-  apiKey: SHOPIFY_API_KEY,
-  apiSecretKey: SHOPIFY_API_SECRET,
-  apiVersion: ApiVersion.April24, // stable
-  scopes: (SCOPES || "read_products,read_customers,write_draft_orders").split(","),
-  hostName: HOST_NAME,
-  isEmbeddedApp: false,
-});
+  const HOST_NAME = (APP_URL || process.env.VERCEL_URL || "cod-app-omega.vercel.app")
+    .toString()
+    .replace(/^https?:\/\//, "");
 
-// ---------- Health & Privacy
+  if (!SHOPIFY_API_KEY || !SHOPIFY_API_SECRET) {
+    throw new Error("Missing SHOPIFY_API_KEY / SHOPIFY_API_SECRET");
+  }
+
+  _shopify = shopifyApi({
+    apiKey: SHOPIFY_API_KEY,
+    apiSecretKey: SHOPIFY_API_SECRET,
+    apiVersion: ApiVersion.April24,
+    scopes: (SCOPES || "read_products,read_customers,write_draft_orders").split(","),
+    hostName: HOST_NAME,
+    isEmbeddedApp: false,
+  });
+  return _shopify;
+}
+
+// ---------- Health & Privacy (should never crash)
 app.get("/", (_req, res) => res.send("COD app is live."));
 app.get("/privacy", (_req, res) => {
   res.type("html").send(`
@@ -82,6 +86,7 @@ app.get("/auth", async (req, res) => {
   try {
     const { shop } = req.query;
     if (!shop) return res.status(400).send("Missing shop");
+    const shopify = getShopify();
     const url = await shopify.auth.oauth.begin({
       shop: shop.toString(),
       callbackPath: "/auth/callback",
@@ -90,13 +95,14 @@ app.get("/auth", async (req, res) => {
     res.redirect(url);
   } catch (e) {
     console.error("auth begin error:", e);
-    res.status(500).send("Auth start error");
+    res.status(500).send("Auth start error: " + e.message);
   }
 });
 
 // ---------- OAuth callback
 app.get("/auth/callback", async (req, res) => {
   try {
+    const shopify = getShopify();
     await ensureTablesSafe();
 
     const { session, scope } = await shopify.auth.oauth.callback({
@@ -117,12 +123,11 @@ app.get("/auth/callback", async (req, res) => {
     res.redirect(`https://${session.shop}/admin/apps`);
   } catch (e) {
     console.error("auth callback error:", e);
-    res.status(500).send("Auth callback error");
+    res.status(500).send("Auth callback error: " + e.message);
   }
 });
 
-// ---------- (Optional) App Proxy endpoint — create Draft Order minimal
-// Configure in Shopify: apps/cod -> https://<host>/proxy/cod (POST)
+// ---------- App Proxy endpoint (optional)
 app.post("/proxy/cod", async (req, res) => {
   try {
     await ensureTablesSafe();
@@ -154,16 +159,15 @@ app.post("/proxy/cod", async (req, res) => {
       },
       body: JSON.stringify(payload),
     });
-
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json({ ok: false, data });
 
     res.json({ ok: true, data });
   } catch (e) {
     console.error("proxy/cod error:", e);
-    res.status(500).json({ ok: false, error: "Server error" });
+    res.status(500).json({ ok: false, error: e.message || "Server error" });
   }
 });
 
-// --- Serverless export (no app.listen())
+// --- Serverless export
 export default app;
