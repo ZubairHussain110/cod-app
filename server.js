@@ -70,7 +70,7 @@ function getShopify() {
   return _shopify;
 }
 
-// ---------- Health & Privacy (should never crash)
+// ---------- Health & Privacy
 app.get("/", (_req, res) => res.send("COD app is live."));
 app.get("/privacy", (_req, res) => {
   res.type("html").send(`
@@ -169,5 +169,7 @@ app.post("/proxy/cod", async (req, res) => {
   }
 });
 
-// --- Serverless export
-export default app;
+// --- IMPORTANT: Express -> Vercel handler (no `listen`)
+export default function handler(req, res) {
+  return app(req, res); // use Express as a request handler
+}
