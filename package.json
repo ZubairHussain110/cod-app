@@ -1,27 +1,15 @@
 {
-  "engines": { "node": "18.x" }
   "name": "cod-app",
   "private": true,
-  "type": "module",
-  "scripts": {
-    "build": "echo 'No build step needed'",
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "@shopify/shopify-api": "7.7.0",
-    "cookie": "0.6.0",
-    "express": "4.19.2",
-    "node-fetch": "3.3.2",
-    "pg": "8.11.5"
-  }
-{
   "type": "module",
   "scripts": {
     "build": "echo \"No build step needed\"",
     "start": "node server.js"
   },
-  "engines": { "node": "18.x" }
-}
-
-  
+  "engines": { "node": "18.x" },
+  "dependencies": {
+    "@shopify/shopify-api": "7.7.0",
+    "express": "4.19.2",
+    "pg": "8.11.5"
+  }
 }
