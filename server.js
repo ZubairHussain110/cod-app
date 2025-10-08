@@ -8,7 +8,7 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- DB (lazy) + SSL for Neon
+// DB (lazy) + SSL (Neon/Vercel)
 let pool;
 function getPool() {
   if (!pool && DATABASE_URL) {
@@ -31,7 +31,7 @@ async function ensureTablesSafe() {
   } catch (e) { console.error("ensureTables error:", e.message); }
 }
 
-// --- Shopify SDK (lazy init)
+// Shopify (lazy init)
 let _shopify = null;
 function getShopify() {
   if (_shopify) return _shopify;
@@ -49,7 +49,7 @@ function getShopify() {
   return _shopify;
 }
 
-// --- Health & Privacy
+// Health & Privacy
 app.get("/", (_req, res) => res.send("COD app is live."));
 app.get("/privacy", (_req, res) => {
   res.type("html").send(`
@@ -60,7 +60,7 @@ app.get("/privacy", (_req, res) => {
   `);
 });
 
-// --- OAuth start
+// OAuth start
 app.get("/auth", async (req, res) => {
   try {
     const { shop } = req.query;
@@ -78,7 +78,7 @@ app.get("/auth", async (req, res) => {
   }
 });
 
-// --- OAuth callback
+// OAuth callback
 app.get("/auth/callback", async (req, res) => {
   try {
     await ensureTablesSafe();
@@ -102,7 +102,7 @@ app.get("/auth/callback", async (req, res) => {
   }
 });
 
-// --- App Proxy: create Draft Order (uses Node18 global fetch)
+// App Proxy: create Draft Order (Node18 global fetch)
 app.post("/proxy/cod", async (req, res) => {
   try {
     await ensureTablesSafe();
@@ -118,7 +118,7 @@ app.post("/proxy/cod", async (req, res) => {
       draft_order: {
         line_items: [{ title: "Cash on Delivery", quantity: 1, price: "0.00" }],
         note: "COD order",
-        tags: ["COD", "COD-App"]
+        tags: ["COD","COD-App"]
       }
     };
 
@@ -139,7 +139,7 @@ app.post("/proxy/cod", async (req, res) => {
   }
 });
 
-// --- Vercel handler (Express as handler, no listen)
+// Vercel handler (no listen)
 export default function handler(req, res) {
   return app(req, res);
 }
