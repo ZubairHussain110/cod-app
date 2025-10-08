@@ -1,4 +1,3 @@
-import { shopifyApi, ApiVersion } from "@shopify/shopify-api";
 import express from "express";
 import crypto from "crypto";
 import fetch from "node-fetch";
@@ -9,7 +8,8 @@ const {
   SHOPIFY_API_KEY,
   SHOPIFY_API_SECRET,
   APP_URL,
-  DATABASE_URL
+  DATABASE_URL,
+  SCOPES
 } = process.env;
 
 if (!SHOPIFY_API_KEY || !SHOPIFY_API_SECRET || !DATABASE_URL) {
@@ -20,147 +20,102 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- DB (Vercel Postgres / Neon)
-const pool = new Pool({ connectionString: DATABASE_URL });
+// --- Neon / Postgres
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+});
 
 const ensureTables = async () => {
   await pool.query(`
-    create table if not exists shop_sessions(
+    create table if not exists shop_sessions (
       shop text primary key,
       access_token text not null,
       scope text,
       created_at timestamptz default now()
-    );
+    )
   `);
 };
 ensureTables();
 
-// --- Shopify SDK
+// --- Shopify API setup
 const shopify = shopifyApi({
   apiKey: SHOPIFY_API_KEY,
   apiSecretKey: SHOPIFY_API_SECRET,
-  scopes: ["read_products", "read_customers", "write_draft_orders"],
-  hostName: (APP_URL || "example.com").replace(/^https?:\/\//, ""),
-  apiVersion: ApiVersion.July25,
-  isEmbeddedApp: true
+  apiVersion: ApiVersion.April24,
+  scopes: (SCOPES || "read_products,read_customers,write_draft_orders").split(","),
+  hostName: APP_URL.replace(/^https?:\/\//, ""),
+  isEmbeddedApp: false,
 });
 
-// ---------- OAuth start
+// --- OAuth start
 app.get("/auth", async (req, res) => {
-  const { shop } = req.query;
-  if (!shop) return res.status(400).send("Missing shop");
-  const authRoute = await shopify.auth.oauth.begin({
-    shop: shop.toString(),
+  const shop = req.query.shop;
+  if (!shop) return res.status(400).send("Missing shop param");
+  const authUrl = await shopify.auth.begin({
+    shop,
     callbackPath: "/auth/callback",
-    isOnline: false
+    isOnline: false,
   });
-  res.redirect(authRoute);
+  res.redirect(authUrl);
 });
 
-// ---------- OAuth callback
+// --- OAuth callback
 app.get("/auth/callback", async (req, res) => {
   try {
-    const { session, scope } = await shopify.auth.oauth.callback({
+    const { shop, accessToken, scope } = await shopify.auth.callback({
       rawRequest: req,
-      rawResponse: res
+      rawResponse: res,
     });
     await pool.query(
-      `insert into shop_sessions(shop, access_token, scope)
-       values($1,$2,$3)
-       on conflict(shop) do update set access_token=excluded.access_token, scope=excluded.scope`,
-      [session.shop, session.accessToken, scope]
+      "insert into shop_sessions (shop, access_token, scope) values ($1, $2, $3) on conflict (shop) do update set access_token=$2, scope=$3",
+      [shop, accessToken, scope]
     );
-    return res.redirect(\`https://\${session.shop}/admin/apps\`);
-  } catch (e) {
-    console.error(e);
-    return res.status(500).send("Auth error");
+    res.send("App installed successfully!");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Auth callback error");
   }
 });
 
-// ---------- Health / Privacy
-app.get("/", (_req, res) => res.send("COD app is live."));
-app.get("/privacy", (_req, res) =>
-  res.type("html").send(`
-  <h1>Privacy Policy — COD (Webixa Technology)</h1>
-  <p>Contact: contact@webixatechnology.com</p>
-  <p>We read products/customers, create draft orders, and store minimal config & tokens.</p>
-  <p>Uninstall → email us for deletion. No card data. TLS enforced.</p>
-`));
-
-// ---------- App Proxy target (verify HMAC + Draft Order Create)
-function verifyProxyHmac(query, secret) {
-  const { hmac, ...rest } = query;
-  const msg = Object.keys(rest)
-    .sort()
-    .map(k => \`\${k}=\${Array.isArray(rest[k]) ? rest[k].join(",") : rest[k]}\`)
-    .join("&");
-  const digest = crypto.createHmac("sha256", secret).update(msg).digest("hex");
-  try {
-    return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac, "utf-8"));
-  } catch {
-    return false;
-  }
-}
-
+// --- Proxy: Create Draft Order
 app.post("/proxy/cod", async (req, res) => {
   try {
-    if (!verifyProxyHmac(req.query, SHOPIFY_API_SECRET))
-      return res.status(403).json({ ok: false, error: "Bad HMAC" });
-
-    const shop = req.query.shop;
+    const { shop } = req.body;
     const result = await pool.query("select access_token from shop_sessions where shop=$1", [shop]);
-    if (!result.rowCount) return res.status(401).json({ ok: false, error: "Shop not installed" });
+    if (!result.rows.length) return res.status(401).send("Shop not found");
+
     const accessToken = result.rows[0].access_token;
-
-    const {
-      lineItems = [],
-      customer = {},
-      shippingAddress = {},
-      note = "COD order",
-      codFee = 0
-    } = req.body || {};
-
-    const draftInput = {
-      note,
-      tags: ["COD", "COD-App"],
-      email: customer.email || null,
-      shippingAddress,
-      billingAddress: shippingAddress,
-      customer: customer.email ? { email: customer.email } : undefined,
-      lineItems: lineItems.map(li => ({
-        variantId: li.variantId,
-        quantity: parseInt(li.quantity || "1", 10)
-      })),
+    const draftOrder = {
+      draft_order: {
+        line_items: [{ title: "Cash on Delivery", price: "0.00" }],
+        note: "COD Order",
+      },
     };
 
-    const gql = `#graphql
-      mutation draftOrderCreate($input: DraftOrderInput!) {
-        draftOrderCreate(input: $input) {
-          draftOrder { id invoiceUrl name }
-          userErrors { field message }
-        }
-      }`;
-
-    const resp = await fetch(\`https://\${shop}/admin/api/2025-07/graphql.json\`, {
+    const response = await fetch(`https://${shop}/admin/api/2024-04/draft_orders.json`, {
       method: "POST",
       headers: {
         "X-Shopify-Access-Token": accessToken,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify({ query: gql, variables: { input: draftInput } })
-    }).then(r => r.json());
+      body: JSON.stringify(draftOrder),
+    });
 
-    if (resp.errors) return res.status(400).json({ ok: false, errors: resp.errors });
-    const ue = resp.data?.draftOrderCreate?.userErrors;
-    if (ue && ue.length) return res.status(400).json({ ok: false, errors: ue });
-
-    const draft = resp.data.draftOrderCreate.draftOrder;
-    return res.json({ ok: true, draftOrderId: draft.id, invoiceUrl: draft.invoiceUrl });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: "Server error" });
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    console.error(error);
+    res.status(500).send("Error creating draft order");
   }
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(\`COD app listening on \${port}\`));
+// --- Privacy page
+app.get("/privacy", (req, res) => {
+  res.send(`
+    <h2>Privacy Policy</h2>
+    <p>This app does not store any personal data except necessary authentication tokens.</p>
+  `);
+});
+
+// --- Serverless export (IMPORTANT)
+export default app;
