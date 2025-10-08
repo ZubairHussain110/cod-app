@@ -1,3 +1,4 @@
+
 import express from "express";
 import { Pool } from "pg";
 import { shopifyApi, ApiVersion } from "@shopify/shopify-api";
@@ -142,4 +143,7 @@ app.post("/proxy/cod", async (req, res) => {
 // Vercel handler (no listen)
 export default function handler(req, res) {
   return app(req, res);
+}
+export default function handler(req, res) {
+  res.status(200).send("OK " + new Date().toISOString());
 }
