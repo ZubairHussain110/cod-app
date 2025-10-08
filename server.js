@@ -1,10 +1,4 @@
-// SMOKE TEST ONLY
-export default function handler(req, res) {
-  res.status(200).send("OK " + new Date().toISOString());
-}
-
 import express from "express";
-import fetch from "node-fetch";
 import { Pool } from "pg";
 import { shopifyApi, ApiVersion } from "@shopify/shopify-api";
 
@@ -14,6 +8,7 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// --- DB (lazy) + SSL for Neon
 let pool;
 function getPool() {
   if (!pool && DATABASE_URL) {
@@ -36,6 +31,7 @@ async function ensureTablesSafe() {
   } catch (e) { console.error("ensureTables error:", e.message); }
 }
 
+// --- Shopify SDK (lazy init)
 let _shopify = null;
 function getShopify() {
   if (_shopify) return _shopify;
@@ -53,6 +49,7 @@ function getShopify() {
   return _shopify;
 }
 
+// --- Health & Privacy
 app.get("/", (_req, res) => res.send("COD app is live."));
 app.get("/privacy", (_req, res) => {
   res.type("html").send(`
@@ -63,6 +60,7 @@ app.get("/privacy", (_req, res) => {
   `);
 });
 
+// --- OAuth start
 app.get("/auth", async (req, res) => {
   try {
     const { shop } = req.query;
@@ -80,13 +78,13 @@ app.get("/auth", async (req, res) => {
   }
 });
 
+// --- OAuth callback
 app.get("/auth/callback", async (req, res) => {
   try {
     await ensureTablesSafe();
     const shopify = getShopify();
     const { session, scope } = await shopify.auth.oauth.callback({
-      rawRequest: req,
-      rawResponse: res,
+      rawRequest: req, rawResponse: res,
     });
     const p = getPool();
     if (p) {
@@ -104,23 +102,33 @@ app.get("/auth/callback", async (req, res) => {
   }
 });
 
+// --- App Proxy: create Draft Order (uses Node18 global fetch)
 app.post("/proxy/cod", async (req, res) => {
   try {
     await ensureTablesSafe();
     const shop = (req.query.shop || req.body.shop || "").toString();
     if (!shop) return res.status(400).json({ ok: false, error: "Missing shop" });
+
     const p = getPool(); if (!p) return res.status(500).json({ ok: false, error: "DB not configured" });
     const r = await p.query("select access_token from shop_sessions where shop=$1", [shop]);
     if (!r.rowCount) return res.status(401).json({ ok: false, error: "Shop not installed" });
 
     const accessToken = r.rows[0].access_token;
     const payload = {
-      draft_order: { line_items: [{ title: "Cash on Delivery", quantity: 1, price: "0.00" }], note: "COD order", tags: ["COD","COD-App"] }
+      draft_order: {
+        line_items: [{ title: "Cash on Delivery", quantity: 1, price: "0.00" }],
+        note: "COD order",
+        tags: ["COD", "COD-App"]
+      }
     };
+
     const resp = await fetch(`https://${shop}/admin/api/2024-04/draft_orders.json`, {
       method: "POST",
-      headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      headers: {
+        "X-Shopify-Access-Token": accessToken,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json({ ok: false, data });
@@ -131,7 +139,7 @@ app.post("/proxy/cod", async (req, res) => {
   }
 });
 
-// Vercel handler
+// --- Vercel handler (Express as handler, no listen)
 export default function handler(req, res) {
   return app(req, res);
 }
