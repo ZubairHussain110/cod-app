@@ -1,3 +1,8 @@
+// SMOKE TEST ONLY
+export default function handler(req, res) {
+  res.status(200).send("OK " + new Date().toISOString());
+}
+
 import express from "express";
 import fetch from "node-fetch";
 import { Pool } from "pg";
