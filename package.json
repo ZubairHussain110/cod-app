@@ -1,4 +1,5 @@
 {
+  "engines": { "node": "18.x" }
   "name": "cod-app",
   "private": true,
   "type": "module",
